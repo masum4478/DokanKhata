@@ -1,0 +1,25 @@
+{
+  "entities": {
+    "Backup": {
+      "title": "User Backup",
+      "description": "Full application data backup for a user",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "lastSynced": { "type": "string" },
+        "data": {
+          "type": "object",
+          "description": "The complete state of the application including contacts, records, and settings"
+        }
+      },
+      "required": ["userId", "data"]
+    }
+  },
+  "firestore": {
+    "/backups/{userId}": {
+      "schema": "Backup",
+      "description": "User-specific backup data"
+    }
+  }
+}

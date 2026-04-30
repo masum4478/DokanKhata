@@ -1,0 +1,55 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: backups
+// Document ID: {userId} (matches request.auth.uid)
+// Fields:
+//   - userId: string (required) - The UID of the user
+//   - userEmail: string (optional) - The email of the user
+//   - lastSynced: string (optional) - Timestamp of last sync
+//   - data: map (required) - The actual backup data
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidBackup(data) {
+      return data.userId is string &&
+             data.userId == request.auth.uid &&
+             data.data is map;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /backups/{userId} {
+      // Users can only read and write their own backup
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidBackup(request.resource.data);
+      allow update: if isOwner(userId) && isValidBackup(request.resource.data);
+      allow delete: if isOwner(userId);
+    }
+
+    // Default deny
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
