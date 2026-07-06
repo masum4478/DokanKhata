@@ -28,17 +28,19 @@ import {
   Banknote,
   ClipboardCheck,
   Zap,
-  Loader2
+  Loader2,
+  Package
 } from 'lucide-react';
 import * as htmlToImage from 'html-to-image';
 import { GoogleGenAI } from "@google/genai";
-import { Contact, Transaction, SalePurchaseRecord, StockTransaction, ContactType, ShopSettings } from '../types';
+import { Contact, Transaction, SalePurchaseRecord, StockTransaction, StockItem, ContactType, ShopSettings } from '../types';
 import DriveImage from './DriveImage';
 
 interface ContactDetailsProps {
   contact: Contact;
   records: SalePurchaseRecord[];
   stockTransactions: StockTransaction[];
+  stockItems: StockItem[];
   contacts: Contact[];
   onBack: () => void;
   onAddTransaction: (t: Transaction) => void;
@@ -56,6 +58,7 @@ const ContactDetails: React.FC<ContactDetailsProps> = ({
   contact, 
   records,
   stockTransactions,
+  stockItems,
   contacts,
   onBack, 
   onAddTransaction, 
@@ -84,6 +87,7 @@ const ContactDetails: React.FC<ContactDetailsProps> = ({
   const [activeAction, setActiveAction] = useState<'RECEIVED' | 'DUE_GIVEN'>('RECEIVED');
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [showStatement, setShowStatement] = useState(false);
+  const [selectedPreviewImage, setSelectedPreviewImage] = useState<string | null>(null);
   
   const inputClasses = "w-full px-4 py-4 bg-gray-50 border-2 border-transparent rounded-2xl outline-none text-sm font-bold text-slate-900 focus:border-gray-200 focus:bg-white transition-all";
   
@@ -570,6 +574,76 @@ ${receiptData.remainingBalance !== undefined ? (receiptData.remainingBalance > 0
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-6">
+        {/* Purchased Products History (For Suppliers) */}
+        {contact.type === ContactType.SUPPLIER && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between px-1">
+              <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">প্রোডাক্ট ক্রয় ইতিহাস</h4>
+              <Package size={14} className="text-gray-300" />
+            </div>
+            
+            <div className="space-y-3">
+              {(() => {
+                const supplierPurchases = stockTransactions.filter(t => t.partyName === contact.name && t.type === 'IN');
+                if (supplierPurchases.length === 0) {
+                  return (
+                    <div className="p-8 text-center bg-white rounded-2xl border border-dashed border-slate-200">
+                      <p className="text-xs text-slate-400 font-bold italic">কোনো প্রোডাক্ট ক্রয়ের রেকর্ড নেই</p>
+                    </div>
+                  );
+                }
+                
+                return supplierPurchases.map((t, idx) => (
+                  <div key={idx} className="p-4 bg-white border border-slate-100 rounded-2xl shadow-sm">
+                    <div className="flex justify-between items-start mb-2">
+                       <div className="flex-1">
+                          <h5 className="text-sm font-black text-slate-900 leading-tight">{t.itemName}</h5>
+                          <div className="flex items-center gap-2 mt-1">
+                             <Calendar size={12} className="text-slate-400" />
+                             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{t.date}</span>
+                          </div>
+                       </div>
+                       <div className="text-right">
+                          <div className="text-xs font-black text-slate-900">{t.quantity} পিস</div>
+                          <div className="text-[10px] font-black text-red-600">৳{(t.quantity * t.price).toLocaleString('bn-BD')}</div>
+                       </div>
+                    </div>
+                    
+                    {/* Serial Numbers for this specific purchase */}
+                    {t.selectedSerials && t.selectedSerials.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-2 pt-2 border-t border-slate-50">
+                        {t.selectedSerials.map((sn, snIdx) => {
+                          const item = stockItems.find(i => i.id === t.itemId);
+                          const isSold = !item?.serialNumbers?.includes(sn);
+                          return (
+                            <span key={snIdx} className={`text-[9px] font-bold px-1.5 py-0.5 rounded border flex items-center gap-1 ${
+                              isSold ? 'bg-red-50 text-red-500 border-red-100' : 'bg-green-50 text-green-700 border-green-100'
+                            }`}>
+                              {sn}
+                              {isSold && <span className="text-[7px] opacity-70">(Sold)</span>}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                    
+                    {t.invoiceImage && (
+                      <div className="mt-3 relative group" onClick={() => setSelectedPreviewImage(t.invoiceImage || null)}>
+                        <DriveImage 
+                          src={t.invoiceImage} 
+                          alt="Invoice" 
+                          className="w-full h-24 object-cover rounded-xl border border-slate-100 cursor-pointer hover:opacity-90 transition-all shadow-sm"
+                          token={googleAccessToken}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
+        )}
+
         {/* Financial Summary Section */}
         <div className="grid grid-cols-3 gap-3">
           <div className="bg-white rounded-2xl p-4 border border-slate-100 shadow-sm flex flex-col items-center text-center">
@@ -1126,6 +1200,58 @@ ${receiptData.remainingBalance !== undefined ? (receiptData.remainingBalance > 0
               )}
 
               <div className="flex-1 overflow-y-auto no-scrollbar space-y-4">
+                 <div className="space-y-4">
+                    <div className="flex items-center justify-between px-1">
+                       <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">প্রোডাক্ট ক্রয় ইতিহাস</h4>
+                       <Package size={14} className="text-gray-300" />
+                    </div>
+                    <div className="space-y-2">
+                       {stockTransactions.filter(t => t.partyName === showSupplierDetail.name && t.type === 'IN').map(t => (
+                         <div key={t.id} className="p-4 bg-gray-50 rounded-2xl border border-gray-100 flex flex-col gap-3">
+                            <div className="flex justify-between items-center">
+                              <div>
+                                 <div className="text-sm font-black text-gray-800 leading-tight">{t.itemName}</div>
+                                 <div className="text-[9px] font-bold text-gray-400 uppercase mt-0.5 tracking-tighter">{t.date}</div>
+                              </div>
+                              <div className="text-right">
+                                 <div className="text-xs font-black text-gray-900">{t.quantity} পিস</div>
+                                 <div className="text-[10px] font-black text-red-600">৳{(t.quantity * t.price).toLocaleString('bn-BD')}</div>
+                              </div>
+                            </div>
+                            
+                            {/* Serial Numbers for this specific purchase */}
+                            {t.selectedSerials && t.selectedSerials.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mt-1">
+                                {t.selectedSerials.map((sn, snIdx) => {
+                                  const item = stockItems.find(i => i.id === t.itemId);
+                                  const isSold = !item?.serialNumbers?.includes(sn);
+                                  return (
+                                    <span key={snIdx} className={`text-[9px] font-bold px-1.5 py-0.5 rounded border flex items-center gap-1 ${
+                                      isSold ? 'bg-red-50 text-red-500 border-red-100' : 'bg-green-50 text-green-700 border-green-100'
+                                    }`}>
+                                      {sn}
+                                      {isSold && <span className="text-[7px] opacity-70">(Sold)</span>}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
+
+                            {t.invoiceImage && (
+                              <div className="relative group" onClick={() => setSelectedPreviewImage(t.invoiceImage || null)}>
+                                <DriveImage 
+                                  src={t.invoiceImage} 
+                                  alt="Invoice" 
+                                  className="w-full h-32 object-cover rounded-xl border border-gray-200 cursor-pointer hover:opacity-90 transition-all"
+                                  token={googleAccessToken}
+                                />
+                              </div>
+                            )}
+                         </div>
+                       ))}
+                    </div>
+                 </div>
+
                  <div className="flex items-center justify-between px-1">
                     <span className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]">লেনদেনের ইতিহাস</span>
                     <History size={14} className="text-gray-300" />
@@ -1145,7 +1271,7 @@ ${receiptData.remainingBalance !== undefined ? (receiptData.remainingBalance > 0
                            </div>
                          </div>
                          {t.invoiceImage && (
-                           <div className="relative group">
+                           <div className="relative group" onClick={() => setSelectedPreviewImage(t.invoiceImage || null)}>
                              <DriveImage 
                                src={t.invoiceImage} 
                                alt="Invoice" 
@@ -1355,6 +1481,69 @@ ${receiptData.remainingBalance !== undefined ? (receiptData.remainingBalance > 0
                 বন্ধ করুন
               </button>
             </footer>
+          </div>
+        </div>
+      )}
+
+      {/* Image Preview Modal */}
+      {selectedPreviewImage && (
+        <div className="fixed inset-0 z-[300] bg-black/95 flex flex-col animate-in fade-in duration-300">
+          <div className="flex justify-between items-center p-6 text-white">
+            <h3 className="text-sm font-black uppercase tracking-[0.2em]">ইমেজ প্রিভিউ</h3>
+            <div className="flex items-center gap-4">
+              {/* Note: Download logic for blob/URL needs the actual blob or the URL from DriveImage */}
+              {/* Since DriveImage manages the URL, we might need a better way if we want direct download from here */}
+              {/* For now, we provide the close button and a basic UI */}
+              <button 
+                onClick={() => setSelectedPreviewImage(null)}
+                className="p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 flex items-center justify-center p-4">
+             <DriveImage 
+               src={selectedPreviewImage} 
+               className="max-w-full max-h-full object-contain rounded-xl shadow-2xl" 
+               token={googleAccessToken} 
+             />
+          </div>
+          <div className="p-8 flex justify-center">
+             <button 
+                onClick={() => {
+                  // Direct download attempt
+                  const fileId = selectedPreviewImage.startsWith('drive://') ? selectedPreviewImage.replace('drive://', '') : null;
+                  if (fileId && googleAccessToken) {
+                    const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+                    fetch(downloadUrl, {
+                      headers: { Authorization: `Bearer ${googleAccessToken}` }
+                    })
+                    .then(res => res.blob())
+                    .then(blob => {
+                      const url = window.URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `attachment_${fileId}.png`;
+                      document.body.appendChild(a);
+                      a.click();
+                      window.URL.revokeObjectURL(url);
+                      document.body.removeChild(a);
+                    })
+                    .catch(e => console.error('Download failed:', e));
+                  } else {
+                    // Fallback for regular URLs
+                    const a = document.createElement('a');
+                    a.href = selectedPreviewImage;
+                    a.download = 'attachment.png';
+                    a.target = '_blank';
+                    a.click();
+                  }
+                }}
+                className="bg-blue-600 text-white px-8 py-4 rounded-2xl font-black text-sm uppercase tracking-widest flex items-center gap-3 shadow-xl shadow-blue-500/20 active:scale-95 transition-all"
+             >
+                <Download size={20} /> ডাউনলোড করুন
+             </button>
           </div>
         </div>
       )}

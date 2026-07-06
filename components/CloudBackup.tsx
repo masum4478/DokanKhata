@@ -37,152 +37,17 @@ import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { compressImage } from '../imageUtils';
 import DriveImage from './DriveImage';
 
-const DRIVE_API_URL = 'https://www.googleapis.com/drive/v3/files';
-const UPLOAD_API_URL = 'https://www.googleapis.com/upload/drive/v3/files';
-const FOLDER_NAME = 'DokanKhata_Backup';
-const IMAGES_FOLDER_NAME = 'Images';
-
-// Helper to get or create a folder in Google Drive
-const getOrCreateFolder = async (token: string, folderName: string, parentId?: string) => {
-  try {
-    const query = encodeURIComponent(`name = '${folderName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false${parentId ? ` and '${parentId}' in parents` : ''}`);
-    const response = await fetch(`${DRIVE_API_URL}?q=${query}&fields=files(id, name)`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error(`Drive search error for ${folderName}:`, errorData);
-      
-      // Check for specific API disabled error
-      if (errorData.error?.message?.includes('Google Drive API has not been used')) {
-        throw new Error('DRIVE_API_NOT_ENABLED');
-      }
-      
-      if (response.status === 401) throw new Error('TOKEN_EXPIRED');
-      if (response.status === 403) throw new Error('DRIVE_PERMISSION_ERROR');
-      return null;
-    }
-
-    const result = await response.json();
-    
-    if (result.files && result.files.length > 0) {
-      return result.files[0].id;
-    }
-
-    // Create folder if not found
-    const createResponse = await fetch(DRIVE_API_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        name: folderName,
-        mimeType: 'application/vnd.google-apps.folder',
-        parents: parentId ? [parentId] : []
-      })
-    });
-
-    if (!createResponse.ok) {
-      const errorData = await createResponse.json();
-      console.error(`Drive folder creation error for ${folderName}:`, errorData);
-      
-      if (errorData.error?.message?.includes('Google Drive API has not been used')) {
-        throw new Error('DRIVE_API_NOT_ENABLED');
-      }
-      
-      if (createResponse.status === 401) throw new Error('TOKEN_EXPIRED');
-      if (createResponse.status === 403) throw new Error('DRIVE_PERMISSION_ERROR');
-      return null;
-    }
-
-    const createResult = await createResponse.json();
-    return createResult.id;
-  } catch (e: any) {
-    if (e.message === 'TOKEN_EXPIRED' || e.message === 'DRIVE_PERMISSION_ERROR' || e.message === 'DRIVE_API_NOT_ENABLED') throw e;
-    console.error(`Error managing folder ${folderName}:`, e);
-    return null;
-  }
-};
-
-// Helper to upload a file to a specific folder
-const uploadFileToDrive = async (token: string, name: string, mimeType: string, content: any, folderId: string, existingFileId?: string) => {
-  try {
-    const metadata = {
-      name,
-      mimeType,
-      parents: existingFileId ? undefined : [folderId]
-    };
-
-    const boundary = '-------314159265358979323846';
-    const firstDelimiter = "--" + boundary + "\r\n";
-    const delimiter = "\r\n--" + boundary + "\r\n";
-    const closeDelim = "\r\n--" + boundary + "--";
-
-    let contentPart: Blob;
-    let actualMimeType = mimeType;
-
-    if (content instanceof Blob) {
-      contentPart = content;
-    } else if (typeof content === 'string' && content.startsWith('data:')) {
-      const match = content.match(/^data:([^;]+);base64,(.+)$/);
-      if (match) {
-        actualMimeType = match[1];
-        const byteCharacters = atob(match[2]);
-        const byteNumbers = new Array(byteCharacters.length);
-        for (let i = 0; i < byteCharacters.length; i++) {
-          byteNumbers[i] = byteCharacters.charCodeAt(i);
-        }
-        const byteArray = new Uint8Array(byteNumbers);
-        contentPart = new Blob([byteArray], { type: actualMimeType });
-      } else {
-        // Fallback for weird data URLs
-        const resp = await fetch(content);
-        contentPart = await resp.blob();
-        actualMimeType = contentPart.type || mimeType;
-      }
-    } else {
-      contentPart = new Blob([typeof content === 'string' ? content : JSON.stringify(content)], { type: mimeType });
-    }
-
-    const body = new Blob([
-      firstDelimiter,
-      'Content-Type: application/json; charset=UTF-8\r\n\r\n',
-      JSON.stringify(metadata),
-      delimiter,
-      `Content-Type: ${actualMimeType}\r\n\r\n`,
-      contentPart,
-      closeDelim
-    ]);
-
-    const url = existingFileId 
-      ? `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=multipart`
-      : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
-    
-    const method = existingFileId ? 'PATCH' : 'POST';
-
-    const response = await fetch(url, {
-      method,
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': `multipart/related; boundary=${boundary}`
-      },
-      body: body
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      console.error(`Upload error for ${name}:`, errorData);
-      throw new Error(errorData.error?.message || 'Upload failed');
-    }
-    const result = await response.json();
-    return result.id;
-  } catch (e: any) {
-    console.error(`Error uploading file ${name}:`, e);
-    throw e;
-  }
-};
+import { 
+  getOrCreateFolder, 
+  uploadFileToDrive, 
+  findDriveBackup, 
+  getDriveFileContent, 
+  syncDataToDrive,
+  FOLDER_NAME,
+  IMAGES_FOLDER_NAME,
+  DRIVE_API_URL,
+  UPLOAD_API_URL
+} from '../services/driveService';
 
 // Helper to delete a file from Drive
 export const deleteFileFromDrive = async (token: string, fileId: string) => {
@@ -260,7 +125,7 @@ export interface UserProfile {
 interface CloudBackupProps {
   onBack: () => void;
   data: any;
-  onLoginSuccess: (profile: UserProfile) => void;
+  onLoginSuccess: (profile: UserProfile, token?: string | null) => void;
   onLogout: () => void;
   onRestore: (data: any, silent?: boolean) => void;
   currentLoggedInState: boolean;
@@ -271,6 +136,8 @@ interface CloudBackupProps {
   onToggleAutoSync: (enabled: boolean) => void;
   googleAccessToken: string | null;
   onUpdateGoogleToken: (token: string | null) => void;
+  onTokenExpired: () => void;
+  isDriveEnabled: boolean;
 }
 
 const CloudBackup: React.FC<CloudBackupProps> = ({ 
@@ -286,7 +153,9 @@ const CloudBackup: React.FC<CloudBackupProps> = ({
   isAutoSyncEnabled,
   onToggleAutoSync,
   googleAccessToken,
-  onUpdateGoogleToken
+  onUpdateGoogleToken,
+  onTokenExpired,
+  isDriveEnabled
 }) => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
@@ -298,7 +167,9 @@ const CloudBackup: React.FC<CloudBackupProps> = ({
   const [hasCloudBackup, setHasCloudBackup] = useState(false);
   const [backupSize, setBackupSize] = useState<string | null>(null);
   const [dataSizeBytes, setDataSizeBytes] = useState<number>(0);
-  const [driveStatus, setDriveStatus] = useState<'IDLE' | 'CHECKING' | 'CONNECTED' | 'ERROR' | 'API_DISABLED'>('IDLE');
+  const [driveStatus, setDriveStatus] = useState<'IDLE' | 'CHECKING' | 'CONNECTED' | 'ERROR' | 'API_DISABLED'>(() => 
+    isDriveEnabled && googleAccessToken ? 'CONNECTED' : 'IDLE'
+  );
   const [driveErrorType, setDriveErrorType] = useState<'NONE' | 'PERMISSION' | 'QUOTA' | 'OTHER'>('NONE');
   const [mainFolderId, setMainFolderId] = useState<string | null>(null);
 
@@ -346,8 +217,12 @@ const CloudBackup: React.FC<CloudBackupProps> = ({
   const checkCloudBackup = async (userId: string) => {
     if (!isFirebaseConfigured || !db) return;
     
-    setDriveStatus('CHECKING');
+    // Only set to checking if not already seen as connected
+    if (driveStatus !== 'CONNECTED') {
+      setDriveStatus('CHECKING');
+    }
     setDriveErrorType('NONE');
+    
     // Check Google Drive first if we have a token
     if (googleAccessToken) {
       try {
@@ -355,20 +230,13 @@ const CloudBackup: React.FC<CloudBackupProps> = ({
         if (folderId) setMainFolderId(folderId);
         
         const file = await findDriveBackup(googleAccessToken);
-        if (file) {
-          setHasCloudBackup(true);
-          setDriveStatus('CONNECTED');
-          return;
-        } else if (folderId) {
-          // Folder exists but no backup file yet
-          setDriveStatus('CONNECTED');
-          return;
-        }
+        if (file) setHasCloudBackup(true);
+        setDriveStatus('CONNECTED');
+        return;
       } catch (e: any) {
         console.error("Drive check failed:", e);
         if (e.message === 'TOKEN_EXPIRED') {
-          localStorage.removeItem('google_access_token');
-          onUpdateGoogleToken(null);
+          onTokenExpired();
           setDriveStatus('IDLE');
         } else if (e.message === 'DRIVE_PERMISSION_ERROR') {
           setDriveStatus('ERROR');
@@ -400,17 +268,23 @@ const CloudBackup: React.FC<CloudBackupProps> = ({
 
   const findDriveBackup = async (token: string) => {
     try {
-      // First find the folder
       const folderId = await getOrCreateFolder(token, FOLDER_NAME);
-      if (!folderId) return null;
+      if (folderId) setMainFolderId(folderId);
 
       const query = encodeURIComponent(`name = 'DokanKhata_Backup.json' and '${folderId}' in parents and trashed = false`);
       const response = await fetch(`${DRIVE_API_URL}?q=${query}&spaces=drive&fields=files(id, name, modifiedTime, size)`, {
         headers: { Authorization: `Bearer ${token}` }
       });
+
+      if (!response.ok) {
+        if (response.status === 401) throw new Error('TOKEN_EXPIRED');
+        return null;
+      }
+
       const result = await response.json();
       return result.files?.[0];
-    } catch (e) {
+    } catch (e: any) {
+      if (e.message === 'TOKEN_EXPIRED') throw e;
       console.error("Error finding Drive backup:", e);
       return null;
     }
@@ -480,22 +354,11 @@ const CloudBackup: React.FC<CloudBackupProps> = ({
   };
 
   const handleSyncToCloud = async (silent = false) => {
-    if (!currentUserProfile) return;
+    if (!currentUserProfile || !googleAccessToken) return;
     
     if (!navigator.onLine) {
       if (!silent) alert('আপনার ইন্টারনেট কানেকশন নেই। দয়া করে ইন্টারনেট চেক করুন।');
       return;
-    }
-
-    // Check if data is too large for Firestore (1MB limit)
-    const isTooLargeForFirestore = dataSizeBytes > 900000; // ~0.9MB safety margin
-    
-    if (isTooLargeForFirestore && !googleAccessToken) {
-      const confirmLogin = window.confirm('আপনার ব্যাকআপ ফাইলটি ১ মেগাবাইটের বেশি। এটি সুরক্ষিত রাখতে গুগল ড্রাইভ কানেক্ট করা প্রয়োজন। আপনি কি এখন গুগল ড্রাইভ কানেক্ট করতে চান?');
-      if (confirmLogin) {
-        handleGoogleLogin();
-        return;
-      }
     }
 
     if (!silent) {
@@ -505,255 +368,43 @@ const CloudBackup: React.FC<CloudBackupProps> = ({
     }
     setSyncSuccess(false);
     
-    let progressInterval: any = null;
     try {
       const now = new Date().toLocaleString('bn-BD');
-      let driveSuccess = false;
-
-      // Simulate progress
-      if (!silent) {
-        progressInterval = setInterval(() => {
-          setSyncProgress(prev => {
-            if (prev >= 90) return prev;
-            return prev + Math.random() * 15;
-          });
-        }, 300);
-      }
-
-      // Try Google Drive Backup first if token exists
-      if (googleAccessToken) {
-        try {
-          // 1. Get or Create Main Folder
-          if (!silent) setCurrentSyncFile('ফোল্ডার চেক করা হচ্ছে...');
-          const folderId = await getOrCreateFolder(googleAccessToken, FOLDER_NAME);
-          if (!folderId) throw new Error('FOLDER_CREATION_FAILED');
-          setMainFolderId(folderId);
-          if (!silent) setSyncProgress(20);
-
-          // 2. Get or Create Images Folder
-          const imagesFolderId = await getOrCreateFolder(googleAccessToken, IMAGES_FOLDER_NAME, folderId);
-          if (!imagesFolderId) throw new Error('IMAGES_FOLDER_CREATION_FAILED');
-          if (!silent) setSyncProgress(30);
-
-          // 3. Sync Images (Stock Items)
-          const updatedStockItems = [];
-          const totalItems = data.stockItems.length;
-          for (let i = 0; i < totalItems; i++) {
-            const item = data.stockItems[i];
-            if (item.image && item.image.startsWith('data:image')) {
-              if (!silent) setCurrentSyncFile(`পণ্য আপলোড: ${item.name || item.id}`);
-              const fileName = `product_${item.id}.jpg`;
-              const fileId = await uploadFileToDrive(googleAccessToken, fileName, 'image/jpeg', item.image, imagesFolderId);
-              if (fileId) {
-                updatedStockItems.push({ ...item, image: `drive://${fileId}` });
-              } else {
-                updatedStockItems.push(item);
-              }
-            } else {
-              updatedStockItems.push(item);
-            }
-            if (!silent) setSyncProgress(30 + (i / totalItems) * 20);
-          }
-
-          // 4. Sync Images (Sale Purchase Records)
-          const updatedRecords = [];
-          const totalRecords = data.salePurchaseRecords.length;
-          for (let i = 0; i < totalRecords; i++) {
-            const record = data.salePurchaseRecords[i];
-            if (record.invoiceImage && record.invoiceImage.startsWith('data:image')) {
-              if (!silent) setCurrentSyncFile(`ইনভয়েস আপলোড: ${record.id}`);
-              const fileName = `invoice_${record.id}.jpg`;
-              const fileId = await uploadFileToDrive(googleAccessToken, fileName, 'image/jpeg', record.invoiceImage, imagesFolderId);
-              if (fileId) {
-                updatedRecords.push({ ...record, invoiceImage: `drive://${fileId}` });
-              } else {
-                updatedRecords.push(record);
-              }
-            } else {
-              updatedRecords.push(record);
-            }
-            if (!silent) setSyncProgress(50 + (i / totalRecords) * 20);
-          }
-
-          // 5. Sync Images (Contacts)
-          const updatedContacts = [];
-          const totalContacts = data.contacts.length;
-          for (let i = 0; i < totalContacts; i++) {
-            const contact = data.contacts[i];
-            if (contact.photo && contact.photo.startsWith('data:image')) {
-              if (!silent) setCurrentSyncFile(`কন্টাক্ট ফটো: ${contact.name || contact.id}`);
-              const fileName = `contact_${contact.id}.jpg`;
-              const fileId = await uploadFileToDrive(googleAccessToken, fileName, 'image/jpeg', contact.photo, imagesFolderId);
-              if (fileId) {
-                updatedContacts.push({ ...contact, photo: `drive://${fileId}` });
-              } else {
-                updatedContacts.push(contact);
-              }
-            } else {
-              updatedContacts.push(contact);
-            }
-            if (!silent) setSyncProgress(70 + (i / totalContacts) * 10);
-          }
-
-          // 6. Sync Shop Logo
-          let updatedShopSettings = { ...data.shopSettings };
-          if (data.shopSettings.shopLogo && data.shopSettings.shopLogo.startsWith('data:image')) {
-            if (!silent) setCurrentSyncFile('দোকান লোগো আপলোড হচ্ছে...');
-            const fileName = `shop_logo_${Date.now()}.jpg`;
-            const fileId = await uploadFileToDrive(googleAccessToken, fileName, 'image/jpeg', data.shopSettings.shopLogo, imagesFolderId);
-            if (fileId) {
-              updatedShopSettings.shopLogo = `drive://${fileId}`;
-            }
-          }
-
-          // 7. Prepare final data with Drive references
-          if (!silent) setCurrentSyncFile('ব্যাকআপ ফাইল তৈরি হচ্ছে...');
-          const finalData = {
-            ...data,
-            stockItems: updatedStockItems,
-            salePurchaseRecords: updatedRecords,
-            contacts: updatedContacts,
-            shopSettings: updatedShopSettings
-          };
-
-          // Update local state with drive links immediately
-          onRestore(finalData, true);
-
-          // 6. Upload JSON Backup to Main Folder
-          if (!silent) setCurrentSyncFile('ড্রাইভে সেভ করা হচ্ছে...');
-          const existingFile = await findDriveBackup(googleAccessToken);
-          const metadata = {
-            name: 'DokanKhata_Backup.json',
-            mimeType: 'application/json',
-            parents: existingFile ? undefined : [folderId]
-          };
-
-          const boundary = '-------314159265358979323846';
-          const delimiter = "\r\n--" + boundary + "\r\n";
-          const close_delim = "\r\n--" + boundary + "--";
-
-          // Use Blob for the main backup file as well
-          const metadataPart = new Blob([JSON.stringify(metadata)], { type: 'application/json' });
-          const contentPart = new Blob([JSON.stringify(finalData)], { type: 'application/json' });
-
-          const body = new Blob([
-            delimiter,
-            'Content-Type: application/json\r\n\r\n',
-            metadataPart,
-            delimiter,
-            'Content-Type: application/json\r\n\r\n',
-            contentPart,
-            close_delim
-          ]);
-
-          const url = existingFile 
-            ? `${UPLOAD_API_URL}/${existingFile.id}?uploadType=multipart`
-            : `${UPLOAD_API_URL}?uploadType=multipart`;
-          
-          const method = existingFile ? 'PATCH' : 'POST';
-
-          const response = await fetch(url, {
-            method,
-            headers: {
-              'Authorization': `Bearer ${googleAccessToken}`,
-              'Content-Type': `multipart/related; boundary=${boundary}`
-            },
-            body: body
-          });
-
-          if (!response.ok) {
-            const err = await response.json();
-            console.error("Google Drive API Error Details:", err);
-            if (err.error?.code === 401) {
-              throw new Error('TOKEN_EXPIRED');
-            }
-            // If it's a 403 or 404, it might be a permission issue or the folder was deleted
-            if (err.error?.code === 403 || err.error?.code === 404) {
-              throw new Error('DRIVE_PERMISSION_ERROR');
-            }
-            throw new Error(`DRIVE_UPLOAD_FAILED: ${err.error?.message || response.statusText}`);
-          }
-          driveSuccess = true;
-          if (!silent) setSyncProgress(95);
-        } catch (driveError: any) {
-          if (driveError.message === 'TOKEN_EXPIRED') {
-            if (!silent) alert('গুগল ড্রাইভ সেশন শেষ হয়ে গেছে। দয়া করে আবার লগইন করুন।');
-            localStorage.removeItem('google_access_token');
-            onUpdateGoogleToken(null);
-            return;
-          }
-          if (driveError.message === 'DRIVE_QUOTA_EXCEEDED') {
-            if (!silent) alert('আপনার গুগল ড্রাইভের স্টোরেজ ফুল হয়ে গেছে! দয়া করে কিছু ফাইল ডিলিট করে জায়গা খালি করুন।');
-            setDriveStatus('ERROR');
-            setDriveErrorType('QUOTA');
-            return;
-          }
-          if (driveError.message === 'DRIVE_PERMISSION_ERROR') {
-            if (!silent) alert('গুগল ড্রাইভ পারমিশন সমস্যা দেখা দিয়েছে। দয়া করে ডিসকানেক্ট করে আবার কানেক্ট করুন এবং লগইন করার সময় বক্সে টিক চিহ্ন দিন।');
-            setDriveStatus('ERROR');
-            setDriveErrorType('PERMISSION');
-            return;
-          }
-          if (driveError.message === 'DRIVE_API_NOT_ENABLED') {
-            if (!silent) alert('আপনার গুগল ক্লাউড কনসোলে "Google Drive API" টি চালু করা নেই। দয়া করে এটি চালু করুন।');
-            setDriveStatus('ERROR');
-            return;
-          }
-          if (driveError.message === 'FOLDER_CREATION_FAILED') {
-            if (!silent) alert('গুগল ড্রাইভে ফোল্ডার তৈরি করতে ব্যর্থ হয়েছে। দয়া করে গুগল ড্রাইভ ডিসকানেক্ট করে আবার কানেক্ট করুন।');
-            setDriveStatus('ERROR');
-            return;
-          }
-          console.error("Google Drive sync failed, falling back to Firestore:", driveError);
+      
+      const result = await syncDataToDrive(googleAccessToken, data, (msg) => {
+        if (!silent) {
+          setCurrentSyncFile(msg);
+          setSyncProgress(prev => Math.min(prev + 10, 95));
         }
-      }
+      });
 
-      // Sync to Firestore as secondary backup (or primary if Drive fails/not connected)
-      // Only if data is small enough
-      if (isFirebaseConfigured && db && !isTooLargeForFirestore) {
-        try {
-          const docRef = doc(db, "backups", currentUserProfile.id);
-          await setDoc(docRef, {
-            data: data,
-            lastSynced: now,
-            userId: currentUserProfile.id,
-            userEmail: currentUserProfile.email
-          });
-        } catch (firestoreError) {
-          console.error("Firestore backup failed:", firestoreError);
-          if (!driveSuccess) throw firestoreError;
+      if (result.success) {
+        if (result.finalData) {
+          onRestore(result.finalData, true);
         }
-      } else if (isTooLargeForFirestore && !driveSuccess) {
-        throw new Error('DATA_TOO_LARGE_AND_DRIVE_FAILED');
+        
+        localStorage.setItem('dokan_last_sync', now);
+        setLastSynced(now);
+        
+        if (!silent) {
+          setSyncProgress(100);
+          setCurrentSyncFile('ব্যাকআপ সফল হয়েছে!');
+          setTimeout(() => {
+            setSyncSuccess(true);
+            setBackupSize(null);
+            setCurrentSyncFile(null);
+          }, 500);
+        }
+        
+        setHasCloudBackup(true);
       }
-      
-      localStorage.setItem('dokan_last_sync', now);
-      setLastSynced(now);
-      
-      if (!silent) {
-        if (progressInterval) clearInterval(progressInterval);
-        setSyncProgress(100);
-        setCurrentSyncFile('ব্যাকআপ সফল হয়েছে!');
-        setTimeout(() => {
-          setSyncSuccess(true);
-          setBackupSize(null); // Hide size after success as requested
-          setCurrentSyncFile(null);
-        }, 500);
-      }
-      
-      setHasCloudBackup(true);
-      if (!silent) setTimeout(() => {
-        setSyncSuccess(false);
-        setSyncProgress(0);
-      }, 5000);
     } catch (error: any) {
-      if (progressInterval) clearInterval(progressInterval);
-      console.error("Sync failed:", error);
-      if (!silent) {
-        if (error.message === 'DATA_TOO_LARGE_AND_DRIVE_FAILED') {
-          alert('আপনার ব্যাকআপ ফাইলটি অনেক বড় (১ মেগাবাইটের বেশি) এবং গুগল ড্রাইভ ব্যাকআপ ব্যর্থ হয়েছে। দয়া করে গুগল ড্রাইভ ডিসকানেক্ট করে আবার কানেক্ট করুন। গুগল ড্রাইভে ১ জিবি পর্যন্ত ফাইল সহজেই ব্যাকআপ রাখা যায়।');
-        } else {
-          alert('ব্যাকআপ ব্যর্থ হয়েছে। আপনার ইন্টারনেট কানেকশন বা গুগল ড্রাইভ পারমিশন চেক করুন। বড় ফাইলের ক্ষেত্রে গুগল ড্রাইভ কানেক্ট থাকা জরুরি।');
+      if (error.message === 'TOKEN_EXPIRED') {
+        onTokenExpired();
+      } else {
+        console.error("Sync failed:", error);
+        if (!silent) {
+          alert('ব্যাকআপ ব্যর্থ হয়েছে।');
         }
       }
     } finally {
@@ -788,8 +439,8 @@ const CloudBackup: React.FC<CloudBackupProps> = ({
           }
         } catch (driveError: any) {
           if (driveError.message === 'TOKEN_EXPIRED') {
-            if (!silent) alert('সেশন শেষ হয়ে গেছে। দয়া করে আবার লগইন করুন।');
-            handleLogout();
+            if (!silent) alert('আপনার সেশন শেষ হয়ে গেছে। দয়া করে আবার লগইন করুন।');
+            onTokenExpired();
             return;
           }
           console.error("Drive restore failed, trying Firestore:", driveError);
@@ -1274,6 +925,22 @@ const CloudBackup: React.FC<CloudBackupProps> = ({
         >
           <Save size={18} /> তথ্য আপডেট করুন
         </button>
+      </div>
+
+      <div className="w-full space-y-4 mb-4">
+        <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest px-1 mb-2">ব্যাকআপ সেটিংস</div>
+        <div className="p-4 bg-white border border-gray-100 rounded-2xl flex items-center justify-between shadow-sm">
+          <div className="flex-1">
+            <div className="text-sm font-black text-gray-900 mb-0.5">অটো-ব্যাকআপ</div>
+            <div className="text-[10px] font-bold text-gray-400 leading-tight">যেকোনো তথ্য পরিবর্তন করলে সাথে সাথে ক্লাউডে সেভ হবে।</div>
+          </div>
+          <button 
+            onClick={onToggleAutoSync}
+            className={`w-14 h-8 rounded-full relative transition-all duration-300 ${isAutoSyncEnabled ? 'bg-green-500 shadow-lg shadow-green-100' : 'bg-gray-200'}`}
+          >
+            <div className={`absolute top-1 w-6 h-6 bg-white rounded-full transition-all duration-300 shadow-sm ${isAutoSyncEnabled ? 'left-7' : 'left-1'}`}></div>
+          </button>
+        </div>
       </div>
 
       <div className="w-full h-px bg-gray-100 mb-8"></div>

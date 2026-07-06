@@ -28,7 +28,7 @@ import {
   Store,
   RefreshCw
 } from 'lucide-react';
-import { Contact, ContactType, ViewState, Transaction, SalePurchaseRecord, StockItem, StockTransaction, ShopSettings } from './types';
+import { Contact, ContactType, ViewState, Transaction, SalePurchaseRecord, StockItem, StockTransaction, ShopSettings, WarrantyItem, WarrantyStatus } from './types';
 import { GoogleGenAI } from "@google/genai";
 import TallyView from './components/TallyView';
 import CashboxView from './components/CashboxView';
@@ -45,7 +45,8 @@ import SaleEntryView from './components/SaleEntryView';
 import ProductReturnView from './components/ProductReturnView';
 import HelpSupportView from './components/HelpSupportView';
 import DriveImage from './components/DriveImage';
-import { findDriveBackup, getDriveFileContent } from './services/driveService';
+import Toast from './components/Toast';
+import { findDriveBackup, getDriveFileContent, syncDataToDrive, uploadFileToDrive } from './services/driveService';
 import { db, isFirebaseConfigured, auth } from './firebase';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
@@ -69,6 +70,7 @@ const App: React.FC = () => {
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(() => localStorage.getItem('google_access_token'));
+  const [isDriveEnabled, setIsDriveEnabled] = useState<boolean>(() => localStorage.getItem('dokan_drive_enabled') === 'true');
 
   const [contacts, setContacts] = useState<Contact[]>(() => {
     const saved = localStorage.getItem('dokan_contacts');
@@ -90,11 +92,73 @@ const App: React.FC = () => {
     return saved ? JSON.parse(saved) : [];
   });
 
+  const [warranties, setWarranties] = useState<WarrantyItem[]>(() => {
+    const saved = localStorage.getItem('dokan_warranties');
+    return saved ? JSON.parse(saved) : [];
+  });
+
   const [isAutoSyncEnabled, setIsAutoSyncEnabled] = useState<boolean>(() => {
     return localStorage.getItem('dokan_auto_sync') === 'true';
   });
 
   const [lastAutoSyncTime, setLastAutoSyncTime] = useState<number>(0);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'loading'; isVisible: boolean }>({
+    message: '',
+    type: 'success',
+    isVisible: false
+  });
+  const [lastActionMessage, setLastActionMessage] = useState<string>('');
+  const [isAutoSyncing, setIsAutoSyncing] = useState(false);
+
+  // Background Auto-Sync logic
+  useEffect(() => {
+    const triggerAutoSync = async () => {
+      if (isAutoSyncEnabled && googleAccessToken && lastActionMessage && !isAutoSyncing) {
+        setIsAutoSyncing(true);
+        try {
+          const dataToBackup = {
+            contacts,
+            salePurchaseRecords,
+            stockItems,
+            shopSettings,
+            stockTransactions,
+            warranties,
+            lastSync: new Date().toISOString()
+          };
+          
+          await uploadFileToDrive(
+            googleAccessToken, 
+            'DokanKhata_Backup.json', 
+            'application/json', 
+            JSON.stringify(dataToBackup),
+            null // Root folder or whatever driveService defaults to
+          );
+          
+          showToast(`${lastActionMessage} সফলভাবে গুগল ড্রাইভে ব্যাকআপ করা হয়েছে`, 'success');
+          setLastAutoSyncTime(Date.now());
+        } catch (error: any) {
+          if (error.message === 'TOKEN_EXPIRED') {
+            handleTokenExpired();
+          } else {
+            console.error("Auto-sync failed:", error);
+          }
+          // Don't show error toast for background sync to avoid annoying user
+        } finally {
+          setIsAutoSyncing(false);
+          // Clear message after sync attempt
+          setTimeout(() => setLastActionMessage(''), 2000);
+        }
+      }
+    };
+
+    if (lastActionMessage) {
+      triggerAutoSync();
+    }
+  }, [lastActionMessage, isAutoSyncEnabled, googleAccessToken]);
+
+  const showToast = (message: string, type: 'success' | 'error' | 'loading' = 'success') => {
+    setToast({ message, type, isVisible: true });
+  };
 
   const safeSaveToLocalStorage = (key: string, value: string) => {
     try {
@@ -123,6 +187,10 @@ const App: React.FC = () => {
   useEffect(() => {
     safeSaveToLocalStorage('dokan_shop_settings', JSON.stringify(shopSettings));
   }, [shopSettings]);
+
+  useEffect(() => {
+    safeSaveToLocalStorage('dokan_warranties', JSON.stringify(warranties));
+  }, [warranties]);
 
   const toggleAutoSync = (enabled: boolean) => {
     setIsAutoSyncEnabled(enabled);
@@ -181,20 +249,50 @@ const App: React.FC = () => {
 
   // Auto-Sync Logic
   useEffect(() => {
-    if (!isAutoSyncEnabled || !isLoggedIn || !user) return;
+    if (!isAutoSyncEnabled || !isLoggedIn || !user || !googleAccessToken) return;
     
-    // Debounce auto-sync to every 5 minutes or after significant changes
-    const timer = setTimeout(() => {
-      const now = Date.now();
-      if (now - lastAutoSyncTime > 5 * 60 * 1000) { // 5 minutes interval
-        console.log("Triggering auto-sync...");
-        // This is a placeholder for background sync
-        // In this architecture, sync is primarily handled in CloudBackup component
+    // Debounce auto-sync
+    const timer = setTimeout(async () => {
+      if (!lastActionMessage) return; // Only sync if there was an action
+
+      try {
+        console.log("Triggering auto-sync for:", lastActionMessage);
+        showToast(`${lastActionMessage} ব্যাকআপ হচ্ছে...`, 'loading');
+        
+        const backupData = {
+          contacts,
+          salePurchaseRecords,
+          stockItems,
+          shopSettings,
+          stockTransactions,
+          warranties
+        };
+
+        const result = await syncDataToDrive(googleAccessToken, backupData);
+        
+        if (result.success) {
+          setLastActionMessage(''); // Clear after success
+          showToast(`${lastActionMessage} ব্যাকআপ সম্পন্ন হয়েছে`, 'success');
+          setLastAutoSyncTime(Date.now());
+          localStorage.setItem('dokan_last_sync', new Date().toLocaleString('bn-BD'));
+          
+          // If images were converted to drive:// links, update state
+          if (result.finalData) {
+            handleRestoreData(result.finalData, true);
+          }
+        }
+      } catch (e: any) {
+        if (e.message === 'TOKEN_EXPIRED') {
+          handleTokenExpired();
+        } else {
+          console.error("Auto-sync failed:", e);
+          showToast('অটো-ব্যাকআপ ব্যর্থ হয়েছে', 'error');
+        }
       }
-    }, 3000);
+    }, 5000); // 5 seconds debounce after last change
 
     return () => clearTimeout(timer);
-  }, [contacts, salePurchaseRecords, stockItems, isLoggedIn, isAutoSyncEnabled, user, lastAutoSyncTime]);
+  }, [contacts, salePurchaseRecords, stockItems, shopSettings, isLoggedIn, isAutoSyncEnabled, user, googleAccessToken, warranties]);
 
   const [lastReminderDate, setLastReminderDate] = useState<string>(() => {
     return localStorage.getItem('dokan_last_reminder_date') || '';
@@ -254,6 +352,7 @@ const App: React.FC = () => {
       if (restoredData.stockItems) setStockItems(restoredData.stockItems);
       if (restoredData.stockTransactions) setStockTransactions(restoredData.stockTransactions);
       if (restoredData.shopSettings) setShopSettings(restoredData.shopSettings);
+      if (restoredData.warranties) setWarranties(restoredData.warranties);
       if (!silent) {
         setIsSyncing(false);
         setCurrentView('TALLY');
@@ -273,7 +372,7 @@ const App: React.FC = () => {
         autoRestoreAttempted.current = true;
         setIsRefreshing(true);
         try {
-          const file = await findDriveBackup(googleAccessToken);
+          const file = await findDriveBackup(googleAccessToken, 'DokanKhata_Backup.json');
           if (file) {
             const cloudData = await getDriveFileContent(googleAccessToken, file.id);
             if (cloudData) {
@@ -281,8 +380,12 @@ const App: React.FC = () => {
               console.log("Auto-restored from Google Drive");
             }
           }
-        } catch (e) {
-          console.error("Auto-restore failed:", e);
+        } catch (e: any) {
+          if (e.message === 'TOKEN_EXPIRED') {
+            handleTokenExpired();
+          } else {
+            console.error("Auto-restore failed:", e);
+          }
         } finally {
           setIsRefreshing(false);
         }
@@ -299,7 +402,7 @@ const App: React.FC = () => {
     
     setIsRefreshing(true);
     try {
-      const file = await findDriveBackup(googleAccessToken);
+      const file = await findDriveBackup(googleAccessToken, 'DokanKhata_Backup.json');
       if (file) {
         const cloudData = await getDriveFileContent(googleAccessToken, file.id);
         if (cloudData) {
@@ -325,8 +428,10 @@ const App: React.FC = () => {
     const exists = contacts.find(c => c.id === updatedContact.id);
     if (exists) {
       setContacts(prev => prev.map(c => c.id === updatedContact.id ? updatedContact : c));
+      setLastActionMessage('কন্টাক্ট আপডেট');
     } else {
       setContacts(prev => [...prev, updatedContact]);
+      setLastActionMessage('নতুন কন্টাক্ট যুক্ত');
     }
     setEditingContact(undefined);
     setCurrentView('TALLY');
@@ -338,12 +443,14 @@ const App: React.FC = () => {
       deleteFileFromDrive(googleAccessToken, contactToDelete.photo.replace('drive://', ''));
     }
     setContacts(prev => prev.filter(c => c.id !== id));
+    setLastActionMessage('কন্টাক্ট ডিলিট');
     setSelectedContactId(null);
     setCurrentView('TALLY');
   };
 
   const addSalePurchaseRecord = (record: SalePurchaseRecord) => {
     setSalePurchaseRecords(prev => [...prev, record]);
+    setLastActionMessage('নতুন রেকর্ড যুক্ত');
   };
 
   const updateContactTransactions = (contactId: string, transaction: Transaction) => {
@@ -374,10 +481,12 @@ const App: React.FC = () => {
     }
     setStockItems(updatedItems);
     setStockTransactions(updatedTransactions);
+    setLastActionMessage('স্টক আপডেট');
   };
 
   const handleUpdateContacts = (updatedContacts: Contact[]) => {
     setContacts(updatedContacts);
+    setLastActionMessage('কন্টাক্ট তালিকা আপডেট');
   };
 
   const handleConfirmSale = (saleData: { 
@@ -441,8 +550,7 @@ const App: React.FC = () => {
       discountType: saleData.discountType
     };
     setSalePurchaseRecords(prev => [...prev, record]);
-
-    // Send WhatsApp Notification for Sale
+    setLastActionMessage('বিক্রি রেকর্ড যুক্ত');
     if (saleData.customerPhone) {
       const generateSaleMsg = async () => {
         try {
@@ -474,7 +582,8 @@ const App: React.FC = () => {
       quantity: item.quantity,
       price: item.price,
       date,
-      partyName: saleData.customerName || 'নগদ কাস্টমার'
+      partyName: saleData.customerName || 'নগদ কাস্টমার',
+      selectedSerials: item.selectedSerials
     }));
     setStockTransactions(prev => [...newStockTransactions, ...prev]);
 
@@ -609,6 +718,7 @@ const App: React.FC = () => {
       items: returnData.items
     };
     setSalePurchaseRecords(prev => [...prev, record]);
+    setLastActionMessage('রিটার্ন রেকর্ড যুক্ত');
 
     if (returnData.contactId) {
       const transaction: Transaction = {
@@ -816,6 +926,8 @@ const App: React.FC = () => {
     if (token) {
       setGoogleAccessToken(token);
       localStorage.setItem('google_access_token', token);
+      setIsDriveEnabled(true);
+      localStorage.setItem('dokan_drive_enabled', 'true');
     }
   };
 
@@ -827,8 +939,26 @@ const App: React.FC = () => {
       setIsLoggedIn(false);
       setUser(null);
       setGoogleAccessToken(null);
+      setIsDriveEnabled(false);
       localStorage.removeItem('google_access_token');
+      localStorage.removeItem('dokan_drive_enabled');
+      
+      // Reset all data for security between different users
+      setContacts([]);
+      setSalePurchaseRecords([]);
+      setStockItems([]);
+      setStockTransactions([]);
       setShopSettings(defaultShopSettings); 
+      
+      // Clear local storage for current user data
+      localStorage.removeItem('dokan_contacts');
+      localStorage.removeItem('dokan_becha_kena');
+      localStorage.removeItem('dokan_stock');
+      localStorage.removeItem('dokan_stock_transactions');
+      localStorage.removeItem('dokan_shop_settings');
+      localStorage.removeItem('dokan_last_sync');
+      
+      autoRestoreAttempted.current = false;
       setCurrentView('TALLY');
       setIsSidebarOpen(false);
     } catch (error) {
@@ -842,6 +972,11 @@ const App: React.FC = () => {
     } else {
       setCurrentView(view);
     }
+  };
+
+  const handleSaveSettings = (settings: ShopSettings) => {
+    setShopSettings(settings);
+    setLastActionMessage('দোকান সেটিংস আপডেট');
   };
 
   const renderView = () => {
@@ -880,13 +1015,13 @@ const App: React.FC = () => {
         return <TallyView contacts={contacts} saleRecords={salePurchaseRecords} onSelectContact={id => { setSelectedContactId(id); setCurrentView('CONTACT_DETAILS'); }} onAddContact={() => { setEditingContact(undefined); setCurrentView('ADD_CONTACT'); }} onNavigate={handleNavigation} typeFilter={ContactType.SUPPLIER} geminiUsageCount={geminiUsageCount} googleAccessToken={googleAccessToken} onTokenExpired={handleTokenExpired} />;
       case 'CASHBOX': return <CashboxView />;
       case 'ADD_CONTACT': return <AddContactForm onBack={() => setCurrentView(editingContact ? 'CONTACT_DETAILS' : 'TALLY')} onSave={addContact} editContact={editingContact} googleAccessToken={googleAccessToken} onTokenExpired={handleTokenExpired} />;
-      case 'CONTACT_DETAILS': return selectedContact ? <ContactDetails contact={selectedContact} records={salePurchaseRecords} stockTransactions={stockTransactions} contacts={contacts} onBack={() => setCurrentView('TALLY')} onAddTransaction={t => updateContactTransactions(selectedContact.id, t)} onDeleteContact={deleteContact} onEditContact={c => { setEditingContact(c); setCurrentView('ADD_CONTACT'); }} onUpdateContacts={handleUpdateContacts} shopSettings={shopSettings} onIncrementGeminiUsage={incrementGeminiUsage} geminiUsageCount={geminiUsageCount} googleAccessToken={googleAccessToken} onTokenExpired={handleTokenExpired} /> : null;
+      case 'CONTACT_DETAILS': return selectedContact ? <ContactDetails contact={selectedContact} records={salePurchaseRecords} stockTransactions={stockTransactions} stockItems={stockItems} contacts={contacts} onBack={() => setCurrentView('TALLY')} onAddTransaction={t => updateContactTransactions(selectedContact.id, t)} onDeleteContact={deleteContact} onEditContact={c => { setEditingContact(c); setCurrentView('ADD_CONTACT'); }} onUpdateContacts={handleUpdateContacts} shopSettings={shopSettings} onIncrementGeminiUsage={incrementGeminiUsage} geminiUsageCount={geminiUsageCount} googleAccessToken={googleAccessToken} onTokenExpired={handleTokenExpired} /> : null;
       case 'BECHA_KENA': return <BechaKenaView records={salePurchaseRecords} stockTransactions={stockTransactions} stockItems={stockItems} contacts={contacts} onBack={() => setCurrentView('TALLY')} onAddRecord={addSalePurchaseRecord} onUpdateContacts={handleUpdateContacts} shopSettings={shopSettings} onSelectContact={id => { setSelectedContactId(id); setCurrentView('CONTACT_DETAILS'); }} googleAccessToken={googleAccessToken} onTokenExpired={handleTokenExpired} />;
-      case 'CLOUD_BACKUP': return <CloudBackup data={{ contacts, salePurchaseRecords, stockItems, shopSettings, stockTransactions }} onBack={() => setCurrentView('TALLY')} onLoginSuccess={handleLoginSuccess} onLogout={handleLogout} onRestore={handleRestoreData} currentLoggedInState={isLoggedIn} currentUserProfile={user} shopSettings={shopSettings} onUpdateShopSettings={setShopSettings} isAutoSyncEnabled={isAutoSyncEnabled} onToggleAutoSync={toggleAutoSync} googleAccessToken={googleAccessToken} onUpdateGoogleToken={setGoogleAccessToken} onTokenExpired={handleTokenExpired} />;
+      case 'CLOUD_BACKUP': return <CloudBackup data={{ contacts, salePurchaseRecords, stockItems, shopSettings, stockTransactions, warranties }} onBack={() => setCurrentView('TALLY')} onLoginSuccess={handleLoginSuccess} onLogout={handleLogout} onRestore={handleRestoreData} currentLoggedInState={isLoggedIn} currentUserProfile={user} shopSettings={shopSettings} onUpdateShopSettings={handleSaveSettings} isAutoSyncEnabled={isAutoSyncEnabled} onToggleAutoSync={toggleAutoSync} googleAccessToken={googleAccessToken} onUpdateGoogleToken={setGoogleAccessToken} onTokenExpired={handleTokenExpired} isDriveEnabled={isDriveEnabled} />;
       case 'AI_CHAT': return <AIChatView contacts={contacts} records={salePurchaseRecords} onBack={() => setCurrentView('TALLY')} persistedMessages={aiMessages} onMessagesUpdate={setAiMessages} onClearChat={() => setAiMessages([])} onSendReminders={handleSendReminders} onSendInvitations={handleSendInvitations} onIncrementGeminiUsage={incrementGeminiUsage} />;
-      case 'STOCK': return <StockView items={stockItems} transactions={stockTransactions} contacts={contacts} onBack={() => setCurrentView('TALLY')} onUpdateStock={handleUpdateStock} onUpdateContacts={handleUpdateContacts} onAddRecord={addSalePurchaseRecord} googleAccessToken={googleAccessToken} onTokenExpired={handleTokenExpired} />;
+      case 'STOCK': return <StockView items={stockItems} transactions={stockTransactions} contacts={contacts} onBack={() => setCurrentView('TALLY')} onUpdateStock={handleUpdateStock} onUpdateContacts={handleUpdateContacts} onAddRecord={addSalePurchaseRecord} onSelectContact={id => { setSelectedContactId(id); setCurrentView('CONTACT_DETAILS'); }} googleAccessToken={googleAccessToken} onTokenExpired={handleTokenExpired} />;
       case 'SALE_ENTRY': return <SaleEntryView contacts={contacts} stockItems={stockItems} onBack={() => setCurrentView('TALLY')} onConfirmSale={handleConfirmSale} shopSettings={shopSettings} googleAccessToken={googleAccessToken} onTokenExpired={handleTokenExpired} />;
-      case 'PRODUCT_RETURN': return <ProductReturnView contacts={contacts} stockItems={stockItems} records={salePurchaseRecords} onBack={() => setCurrentView('TALLY')} onConfirmReturn={handleConfirmReturn} onDeleteReturn={handleDeleteReturn} onIncrementGeminiUsage={incrementGeminiUsage} />;
+      case 'PRODUCT_RETURN': return <ProductReturnView contacts={contacts} stockItems={stockItems} records={salePurchaseRecords} warranties={warranties} onUpdateWarranties={(updatedWarranties) => { setWarranties(updatedWarranties); setLastActionMessage('ওয়ারেন্টি ও সার্ভিস তালিকা আপডেট'); }} onBack={() => setCurrentView('TALLY')} onConfirmReturn={handleConfirmReturn} onDeleteReturn={handleDeleteReturn} />;
       case 'HELP_SUPPORT': return <HelpSupportView onBack={() => setCurrentView('TALLY')} />;
       default: return <TallyView contacts={contacts} saleRecords={salePurchaseRecords} onSelectContact={() => {}} onAddContact={() => {}} onNavigate={handleNavigation} />;
     }
@@ -904,7 +1039,9 @@ const App: React.FC = () => {
 
   const handleTokenExpired = () => {
     setGoogleAccessToken(null);
+    setIsDriveEnabled(false);
     localStorage.removeItem('google_access_token');
+    localStorage.removeItem('dokan_drive_enabled');
     console.warn('Google Access Token expired and cleared from state');
   };
 
@@ -944,6 +1081,7 @@ const App: React.FC = () => {
       </header>
       <Sidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} isLoggedIn={isLoggedIn} user={user} shopSettings={shopSettings} onNavigate={view => { setCurrentView(view); setIsSidebarOpen(false); }} onLogout={handleLogout} googleAccessToken={googleAccessToken} onTokenExpired={handleTokenExpired} />
       <main className="flex-1 overflow-y-auto pb-20 bg-gray-50">{renderView()}</main>
+      <Toast message={toast.message} type={toast.type} isVisible={toast.isVisible} onClose={() => setToast(prev => ({ ...prev, isVisible: false }))} />
       {['TALLY', 'CASHBOX', 'STOCK', 'CUSTOMERS', 'SUPPLIERS', 'SALE_ENTRY'].includes(currentView) ? (
         <Navigation currentView={currentView} onNavigate={handleNavigation} />
       ) : null}

@@ -61,6 +61,7 @@ export interface StockItem {
   quantity: number;
   unit: string;
   buyingPrice: number;
+  previousBuyingPrice?: number;
   sellingPrice: number;
   lastUpdated: string;
   image?: string;
@@ -76,6 +77,7 @@ export interface StockTransaction {
   date: string;
   partyName: string; // Supplier for IN, Customer for OUT
   invoiceImage?: string;
+  selectedSerials?: string[];
 }
 
 export interface ShopSettings {
@@ -90,6 +92,32 @@ export interface ShopSettings {
   invoiceColor?: string;
   reminderTemplates?: string[];
   invitationTemplates?: string[];
+}
+
+export enum WarrantyStatus {
+  RECEIVED_FROM_CUSTOMER = 'RECEIVED_FROM_CUSTOMER', // কাস্টমার থেকে গৃহীত
+  SENT_TO_SUPPLIER = 'SENT_TO_SUPPLIER',             // সাপ্লায়ারের কাছে পাঠানো
+  RECEIVED_FROM_SUPPLIER = 'RECEIVED_FROM_SUPPLIER', // সাপ্লায়ার থেকে রিসিভড
+  DELIVERED_TO_CUSTOMER = 'DELIVERED_TO_CUSTOMER'    // কাস্টমারকে বুঝিয়ে দেওয়া হয়েছে
+}
+
+export interface WarrantyItem {
+  id: string;
+  customerName: string;
+  customerPhone: string;
+  productId?: string;
+  productName: string;
+  productImage?: string; // Base64 or Drive URI
+  serialNumber?: string;
+  issueDescription: string;
+  supplierId?: string; // Selected supplier id if any
+  supplierName?: string; // Selected supplier name if any
+  status: WarrantyStatus;
+  receivedDate: string;
+  sentToSupplierDate?: string;
+  receivedFromSupplierDate?: string;
+  deliveredToCustomerDate?: string;
+  notes?: string;
 }
 
 export type ViewState = 'TALLY' | 'CASHBOX' | 'WALLET' | 'MENU' | 'ADD_CONTACT' | 'CONTACT_DETAILS' | 'BECHA_KENA' | 'CLOUD_BACKUP' | 'AI_CHAT' | 'AI_RECOMMENDATIONS' | 'STOCK' | 'SALE_ENTRY' | 'CUSTOMERS' | 'SUPPLIERS' | 'HELP_SUPPORT' | 'PRODUCT_RETURN';

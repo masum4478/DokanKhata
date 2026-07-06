@@ -1229,6 +1229,7 @@ ${receiptData.remainingBalance > 0 ? `অবশিষ্ট বকেয়া: ৳
           record={showInvoiceView} 
           shopSettings={shopSettings} 
           onClose={() => setShowInvoiceView(null)} 
+          googleAccessToken={googleAccessToken}
         />
       )}
     </div>
