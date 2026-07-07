@@ -33,6 +33,15 @@ jobs:
     - name: Build Web App
       run: npm run build
 
+    - name: Initialize Android Platform if missing
+      run: |
+        if [ ! -d "android" ]; then
+          echo "Android platform directory not found in repository. Creating it..."
+          npx cap add android
+        else
+          echo "Android platform directory exists in repository."
+        fi
+
     - name: Sync Capacitor Android
       run: npx cap sync android
 
